@@ -119,25 +119,61 @@ df_final <- df_final %>%
 library(tidyverse)
 library(tableone)
 # 四分基线表
-# 1. 过滤 Group_4cat_90 中的 NA (80例)，计算差值
+library(tidyverse)
+library(tableone)
+# 1. 数据预处理：过滤 NA 分组，应用全量修复的高血压与糖尿病定义，计算差值
 df_analysis <- df_final %>%
   filter(!is.na(Group_4cat_90)) %>%
-  mutate(eGFR_diff = egfr - pheno_egfr)
+  mutate(
+    # eGFR 错位差值计算
+    eGFR_diff     = egfr - pheno_egfr,
+    kdm_egfr_diff = egfr - kdm_egfr,
+    
+    # 标准化年龄分组与性别标签
+    Age_Group = factor(age_group, levels = c("45-59岁", "60-74岁", ">=75岁"),
+                                  labels = c("45-59 years", "60-74 years", ">=75 years")),
+    Sex = factor(gender, levels = c(1, 2), labels = c("Male", "Female")),
+    
+    # 与森林图严格对齐：全量修复糖尿病 (结合 HbA1c 与常规血糖)
+    Diabetes = case_when(
+      hba1c >= 6.5 | glucose_mmol >= 7.0 ~ "Yes",
+      diabetes_cat %in% c("糖尿病", 1, "1", "Yes") ~ "Yes",
+      !is.na(hba1c) & hba1c < 6.5 ~ "No",
+      !is.na(glucose_mmol) & glucose_mmol < 7.0 ~ "No",
+      diabetes_cat %in% c("非糖尿病", 0, 2, "0", "2", "No") ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # 与森林图严格对齐：全量修复高血压 (结合实测血压与高血压标签)
+    Hypertension = case_when(
+      sbp >= 140 | dbp >= 90 ~ "Yes",
+      hyperten %in% c(1, "1", "Yes") | hyperten_cat %in% c("高血压", 1, "1", "Yes") ~ "Yes",
+      (!is.na(sbp) & sbp < 140) & (!is.na(dbp) & dbp < 90) ~ "No",
+      hyperten %in% c(0, 2, "0", "2", "No") | hyperten_cat %in% c("非高血压", 0, 2, "0", "2", "No") ~ "No",
+      TRUE ~ NA_character_
+    )
+  )
 
-# 2. 匹配数据框中实际存在的变量
+# 2. 匹配 Table 1 变量列表 (以修复后的全量变量为主)
 vars_table1 <- c(
-  "age", "gender", "race", "BMXBMI", 
-  "creat", "alb_gL", "glu_mmol", "crp_mgdL", 
+  "age", "Sex", "race", "BMXBMI", 
+  "Hypertension", "Diabetes",
+  "creat", "alb_gL", "glu_mmol", "crp_mgdL", "hba1c", "sbp", "dbp",
   "Lymph_pct", "MCV", "RDW", "ALP", "WBC",
-  "egfr", "phenoage0", "pheno_egfr", "eGFR_diff",
-  "age_group", "hyperten_cat", "diabetes_cat", "status"
+  "egfr", 
+  "phenoage0", "pheno_egfr", "eGFR_diff",
+  "kdm_age", "kdm_egfr", "kdm_egfr_diff",
+  "Age_Group", "status"
 )
 
+# 自动匹配数据集中存在的列
 vars_table1 <- intersect(vars_table1, names(df_analysis))
-cat_vars <- intersect(c("gender", "race", "age_group", "hyperten_cat", "diabetes_cat", "status"), vars_table1)
-nonnormal_vars <- intersect(c("creat", "crp_mgdL", "glu_mmol", "ALP", "WBC", "eGFR_diff"), vars_table1)
 
-# 3. 构建并打印非加权 Table 1
+# 分类变量与偏态连续变量定义
+cat_vars <- intersect(c("Sex", "race", "Age_Group", "Hypertension", "Diabetes", "status"), vars_table1)
+nonnormal_vars <- intersect(c("creat", "crp_mgdL", "glu_mmol", "ALP", "WBC", "eGFR_diff", "kdm_egfr_diff"), vars_table1)
+
+# 3. 生成非加权基线表 Table 1
 tab1_unweighted <- CreateTableOne(
   vars = vars_table1,
   strata = "Group_4cat_90",
@@ -146,11 +182,161 @@ tab1_unweighted <- CreateTableOne(
   test = TRUE
 )
 
+# 控制台打印查看
 print(tab1_unweighted, nonnormal = nonnormal_vars, showAllLevels = TRUE, quote = FALSE, noSpaces = TRUE)
 
-# 4. 导出 CSV
+# 4. 导出为规范的 CSV 表格
 tab1_unw_mat <- print(tab1_unweighted, nonnormal = nonnormal_vars, showAllLevels = TRUE, printToggle = FALSE)
-write.csv(tab1_unw_mat, file = "Table1_Unweighted_Group90.csv")
-# 检查频数与占比
-table(df_final$Group_4cat_90, useNA = "ifany")
-prop.table(table(df_final$Group_4cat_90)) * 100
+write.csv(tab1_unw_mat, file = "Table1_Unweighted_Consistent_Group90.csv")
+library(tidyverse)
+library(survival)
+library(forestplot)
+# 绘制亚组分层森林图
+# 1. 重新映射全员覆盖的高血压与糖尿病变量
+time_col   <- intersect(c("permth_exm", "time", "permth_int"), names(df_analysis))[1]
+status_col <- intersect(c("status", "mortstat"), names(df_analysis))[1]
+
+df_sub <- df_analysis %>%
+  filter(Group_4cat_90 %in% c("Normal (Ref)", "Pseudonormal (Target)")) %>%
+  mutate(
+    time_surv   = as.numeric(.data[[time_col]]),
+    status_surv = as.numeric(.data[[status_col]]),
+    target_exp  = ifelse(Group_4cat_90 == "Pseudonormal (Target)", 1, 0),
+    
+    # 年龄分层与性别标准英文标签
+    Age_Group = factor(age_group, levels = c("45-59岁", "60-74岁", ">=75岁"),
+                                  labels = c("45-59 years", "60-74 years", ">=75 years")),
+    Sex = factor(gender, levels = c(1, 2), labels = c("Male", "Female")),
+    
+    # 糖尿病全量修复：结合 HbA1c 与常规血糖
+    Diabetes = case_when(
+      hba1c >= 6.5 | glucose_mmol >= 7.0 ~ "Yes",
+      diabetes_cat %in% c("糖尿病", 1, "1", "Yes") ~ "Yes",
+      !is.na(hba1c) & hba1c < 6.5 ~ "No",
+      !is.na(glucose_mmol) & glucose_mmol < 7.0 ~ "No",
+      diabetes_cat %in% c("非糖尿病", 0, 2, "0", "2", "No") ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # 高血压全量修复：结合实测血压与高血压标签
+    Hypertension = case_when(
+      sbp >= 140 | dbp >= 90 ~ "Yes",
+      hyperten %in% c(1, "1", "Yes") | hyperten_cat %in% c("高血压", 1, "1", "Yes") ~ "Yes",
+      (!is.na(sbp) & sbp < 140) & (!is.na(dbp) & dbp < 90) ~ "No",
+      hyperten %in% c(0, 2, "0", "2", "No") | hyperten_cat %in% c("非高血压", 0, 2, "0", "2", "No") ~ "No",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(target_exp), !is.na(time_surv), !is.na(status_surv))
+
+# 2. 亚组变量定义
+subgroup_vars   <- c("Age_Group", "Sex", "Hypertension", "Diabetes")
+subgroup_labels <- c("Age Group", "Sex", "Hypertension", "Diabetes")
+
+# 3. 循环计算效应量与交互作用 P 值
+res_list <- list()
+
+for (i in seq_along(subgroup_vars)) {
+  var       <- subgroup_vars[i]
+  var_label <- subgroup_labels[i]
+  lvls      <- levels(as.factor(df_sub[[var]]))
+  lvls      <- lvls[!is.na(lvls)]
+  
+  d_complete <- df_sub %>% filter(!is.na(.data[[var]]))
+  f_base     <- as.formula(paste("Surv(time_surv, status_surv) ~ target_exp +", var))
+  f_int      <- as.formula(paste("Surv(time_surv, status_surv) ~ target_exp *", var))
+  
+  p_inter_val <- tryCatch({
+    fit_base <- coxph(f_base, data = d_complete)
+    fit_int  <- coxph(f_int,  data = d_complete)
+    anova(fit_base, fit_int)[2, "Pr(>|Chi|)"]
+  }, error = function(e) NA)
+  
+  p_inter_str <- ifelse(is.na(p_inter_val), "-", sprintf("%.3f", p_inter_val))
+  
+  # 添加大类表头行
+  res_list[[paste0(var, "_header")]] <- data.frame(
+    Subgroup      = var_label,
+    Events_Target = "",
+    Events_Ref    = "",
+    HR = NA, Low = NA, High = NA,
+    HR_CI         = "",
+    P_inter       = p_inter_str,
+    is_summary    = TRUE,
+    stringsAsFactors = FALSE
+  )
+  
+  for (lvl in lvls) {
+    d_lvl <- d_complete %>% filter(.data[[var]] == lvl)
+    
+    n_tar <- sum(d_lvl$target_exp == 1)
+    e_tar <- sum(d_lvl$target_exp == 1 & d_lvl$status_surv == 1)
+    n_ref <- sum(d_lvl$target_exp == 0)
+    e_ref <- sum(d_lvl$target_exp == 0 & d_lvl$status_surv == 1)
+    
+    fit_sub <- tryCatch(
+      coxph(Surv(time_surv, status_surv) ~ target_exp, data = d_lvl),
+      error = function(e) NULL
+    )
+    
+    if (!is.null(fit_sub) && "target_exp" %in% names(coef(fit_sub))) {
+      hr_val   <- as.numeric(exp(coef(fit_sub)["target_exp"]))
+      ci_vals  <- as.numeric(exp(confint(fit_sub)["target_exp", ]))
+      low_val  <- ci_vals[1]
+      high_val <- ci_vals[2]
+      hr_str   <- sprintf("%.2f (%.2f-%.2f)", hr_val, low_val, high_val)
+    } else {
+      hr_val <- NA; low_val <- NA; high_val <- NA
+      hr_str <- "Not estimable"
+    }
+    
+    res_list[[paste0(var, "_", lvl)]] <- data.frame(
+      Subgroup      = paste0("   ", lvl),
+      Events_Target = paste0(e_tar, "/", n_tar),
+      Events_Ref    = paste0(e_ref, "/", n_ref),
+      HR = hr_val, Low = low_val, High = high_val,
+      HR_CI         = hr_str,
+      P_inter       = "",
+      is_summary    = FALSE,
+      stringsAsFactors = FALSE
+    )
+  }
+}
+
+forest_df <- bind_rows(res_list)
+
+# 4. 组装表格并绘制完整森林图
+tabletext <- cbind(
+  c("Subgroup", forest_df$Subgroup),
+  c("Pseudonormal\n(Events/N)", forest_df$Events_Target),
+  c("Normal\n(Events/N)", forest_df$Events_Ref),
+  c("Hazard Ratio\n(95% CI)", forest_df$HR_CI),
+  c("P for\nInteraction", forest_df$P_inter)
+)
+
+mean_vec  <- c(NA, forest_df$HR)
+lower_vec <- c(NA, forest_df$Low)
+upper_vec <- c(NA, forest_df$High)
+is_summ   <- c(TRUE, forest_df$is_summary)
+
+forestplot(
+  labeltext = tabletext,
+  mean = mean_vec,
+  lower = lower_vec,
+  upper = upper_vec,
+  is.summary = is_summ,
+  zero = 1.0,
+  xlog = TRUE,
+  clip = c(0.4, 6.0),
+  xticks = c(0.5, 1.0, 2.0, 4.0),
+  xlab = "Hazard Ratio (95% CI) for All-Cause Mortality (Pseudonormal vs Normal)",
+  col = fpColors(box = "#1B4F72", line = "#2C3E50", summary = "#2C3E50"),
+  boxsize = 0.25,
+  ci.vertices = TRUE,
+  ci.vertices.height = 0.15,
+  txt_gp = fpTxtGp(
+    label = gpar(cex = 0.85),
+    ticks = gpar(cex = 0.8),
+    xlab  = gpar(cex = 0.9)
+  )
+)
