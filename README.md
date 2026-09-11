@@ -88,3 +88,35 @@ cat("--- 数据筛选与清洗流向统计 ---\n",
     "步骤4 (PhenoAge 完整):", N4, "\n",
     "步骤5 (剔除肌酐极值):", N5, "\n",
     "最终分析样本量 (N_final):", N_final, "\n")
+library(dplyr)
+
+df_final <- df_final %>%
+  mutate(
+    Group_4cat_90 = case_when(
+      egfr >= 90 & pheno_egfr >= 90 ~ "1_Normal",
+      egfr >= 90 & pheno_egfr < 90  ~ "2_Pseudonormal", 
+      egfr < 90  & pheno_egfr >= 90 ~ "3_Pseudoabnormal",
+      egfr < 90  & pheno_egfr < 90  ~ "4_Impaired",
+      TRUE ~ NA_character_
+    ),
+    
+    Group_4cat_90 = factor(
+      Group_4cat_90,
+      levels = c(
+        "1_Normal", 
+        "2_Pseudonormal", 
+        "3_Pseudoabnormal", 
+        "4_Impaired"
+      ),
+      labels = c(
+        "Normal (Ref)", 
+        "Pseudonormal (Target)", 
+        "Pseudoabnormal", 
+        "Impaired"
+      )
+    )
+  )
+
+# 检查频数与占比
+table(df_final$Group_4cat_90, useNA = "ifany")
+prop.table(table(df_final$Group_4cat_90)) * 100
