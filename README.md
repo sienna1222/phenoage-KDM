@@ -89,7 +89,7 @@ cat("--- 数据筛选与清洗流向统计 ---\n",
     "步骤5 (剔除肌酐极值):", N5, "\n",
     "最终分析样本量 (N_final):", N_final, "\n")
 library(dplyr)
-
+# 以egfr90为界限分组
 df_final <- df_final %>%
   mutate(
     Group_4cat_90 = case_when(
@@ -116,7 +116,41 @@ df_final <- df_final %>%
       )
     )
   )
+library(tidyverse)
+library(tableone)
+# 四分基线表
+# 1. 过滤 Group_4cat_90 中的 NA (80例)，计算差值
+df_analysis <- df_final %>%
+  filter(!is.na(Group_4cat_90)) %>%
+  mutate(eGFR_diff = egfr - pheno_egfr)
 
+# 2. 匹配数据框中实际存在的变量
+vars_table1 <- c(
+  "age", "gender", "race", "BMXBMI", 
+  "creat", "alb_gL", "glu_mmol", "crp_mgdL", 
+  "Lymph_pct", "MCV", "RDW", "ALP", "WBC",
+  "egfr", "phenoage0", "pheno_egfr", "eGFR_diff",
+  "age_group", "hyperten_cat", "diabetes_cat", "status"
+)
+
+vars_table1 <- intersect(vars_table1, names(df_analysis))
+cat_vars <- intersect(c("gender", "race", "age_group", "hyperten_cat", "diabetes_cat", "status"), vars_table1)
+nonnormal_vars <- intersect(c("creat", "crp_mgdL", "glu_mmol", "ALP", "WBC", "eGFR_diff"), vars_table1)
+
+# 3. 构建并打印非加权 Table 1
+tab1_unweighted <- CreateTableOne(
+  vars = vars_table1,
+  strata = "Group_4cat_90",
+  data = df_analysis,
+  factorVars = cat_vars,
+  test = TRUE
+)
+
+print(tab1_unweighted, nonnormal = nonnormal_vars, showAllLevels = TRUE, quote = FALSE, noSpaces = TRUE)
+
+# 4. 导出 CSV
+tab1_unw_mat <- print(tab1_unweighted, nonnormal = nonnormal_vars, showAllLevels = TRUE, printToggle = FALSE)
+write.csv(tab1_unw_mat, file = "Table1_Unweighted_Group90.csv")
 # 检查频数与占比
 table(df_final$Group_4cat_90, useNA = "ifany")
 prop.table(table(df_final$Group_4cat_90)) * 100
