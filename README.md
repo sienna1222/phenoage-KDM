@@ -340,3 +340,217 @@ forestplot(
     xlab  = gpar(cex = 0.9)
   )
 )
+# 马氏距离
+install.packages("forestploter")
+library(forestploter)
+library(tidyverse)
+library(survival)
+install.packages("PMCMRplus")
+library(PMCMRplus)
+# 1. 动态自动匹配 NHANES4 中 9 项 PhenoAge 核心生化指标的实际列名
+col_map <- list(
+  alb   = intersect(c("albumin", "alb_gL", "alb"), names(NHANES4))[1],
+  creat = intersect(c("creatinine", "creat"), names(NHANES4))[1],
+  glu   = intersect(c("glucose", "glu_mmol", "glu"), names(NHANES4))[1],
+  crp   = intersect(c("crp", "crp_mgdL"), names(NHANES4))[1],
+  lymph = intersect(c("lymph", "Lymph_pct", "lymphocyte"), names(NHANES4))[1],
+  mcv   = intersect(c("mcv", "MCV"), names(NHANES4))[1],
+  rdw   = intersect(c("rdw", "RDW"), names(NHANES4))[1],
+  alp   = intersect(c("alp", "ALP"), names(NHANES4))[1],
+  wbc   = intersect(c("wbc", "WBC"), names(NHANES4))[1]
+)
+
+cat("匹配到的变量名映射：\n")
+print(unlist(col_map))
+
+# 2. 构建特征矩阵并对偏态变量做 log 转换 (符合 Cohen 2013 文献方法)
+nhanes_dm_prep <- NHANES4 %>%
+  mutate(
+    feat_alb   = .data[[col_map$alb]],
+    feat_creat = log(.data[[col_map$creat]]),
+    feat_glu   = log(.data[[col_map$glu]]),
+    feat_crp   = log(.data[[col_map$crp]] + 0.01),
+    feat_lymph = .data[[col_map$lymph]],
+    feat_mcv   = .data[[col_map$mcv]],
+    feat_rdw   = .data[[col_map$rdw]],
+    feat_alp   = log(.data[[col_map$alp]]),
+    feat_wbc   = log(.data[[col_map$wbc]])
+  )
+
+features <- c("feat_alb", "feat_creat", "feat_glu", "feat_crp", 
+              "feat_lymph", "feat_mcv", "feat_rdw", "feat_alp", "feat_wbc")
+
+# 3. 构建 20-39 岁年轻健康参考人群基准 (Reference Population)
+ref_pop <- nhanes_dm_prep %>%
+  filter(
+    age >= 20 & age <= 39,
+    # 血压与病史
+    (is.na(sbp) | sbp < 140) & (is.na(dbp) | dbp < 90),
+    if("hyperten" %in% names(.)) (is.na(hyperten) | hyperten == 0) else TRUE,
+    # 血糖与糖化
+    if("hba1c" %in% names(.)) (is.na(hba1c) | hba1c < 6.5) else TRUE,
+    # 肾功能基线
+    if("egfr" %in% names(.)) (is.na(egfr) | egfr >= 90) else TRUE
+  ) %>%
+  drop_na(all_of(features))
+
+cat("健康年轻参考基准样本量 (N_ref):", nrow(ref_pop), "\n")
+
+# 计算参考基准均值向量 μ 与协方差矩阵 S
+mu_ref <- colMeans(ref_pop[, features])
+S_ref  <- cov(ref_pop[, features])
+
+# 4. 在分析数据集 df_analysis 中计算马氏距离 DM
+df_analysis <- df_analysis %>%
+  mutate(
+    feat_alb   = .data[[intersect(c("alb_gL", "albumin", "alb"), names(.))[1]]],
+    feat_creat = log(.data[[intersect(c("creat", "creatinine"), names(.))[1]]]),
+    feat_glu   = log(.data[[intersect(c("glucose", "glu_mmol", "glu"), names(.))[1]]]),
+    feat_crp   = log(.data[[intersect(c("crp", "crp_mgdL"), names(.))[1]]] + 0.01),
+    feat_lymph = .data[[intersect(c("Lymph_pct", "lymph"), names(.))[1]]],
+    feat_mcv   = .data[[intersect(c("MCV", "mcv"), names(.))[1]]],
+    feat_rdw   = .data[[intersect(c("RDW", "rdw"), names(.))[1]]],
+    feat_alp   = log(.data[[intersect(c("ALP", "alp"), names(.))[1]]]),
+    feat_wbc   = log(.data[[intersect(c("WBC", "wbc"), names(.))[1]]])
+  )
+
+complete_idx <- complete.cases(df_analysis[, features])
+
+# 开方得到真实的 D_M
+df_analysis$DM_score <- NA_real_
+df_analysis$DM_score[complete_idx] <- sqrt(
+  mahalanobis(
+    x      = df_analysis[complete_idx, features],
+    center = mu_ref,
+    cov    = S_ref
+  )
+)
+
+df_analysis <- df_analysis %>%
+  mutate(
+    DM_scaled = DM_score / sd(DM_score, na.rm = TRUE),
+    log_DM    = log(DM_score)
+  )
+
+# 5. 检验“假性正常”人群与“正常人群”的马氏距离差异
+cat("\n----- 四组马氏距离分布统计 (Mean ± SD, Median [IQR]) -----\n")
+df_analysis %>%
+  filter(!is.na(Group_4cat_90)) %>%
+  group_by(Group_4cat_90) %>%
+  summarise(
+    N         = sum(!is.na(DM_score)),
+    DM_Mean   = round(mean(DM_score, na.rm = TRUE), 2),
+    DM_SD     = round(sd(DM_score, na.rm = TRUE), 2),
+    DM_Median = round(median(DM_score, na.rm = TRUE), 2),
+    DM_IQR25  = round(quantile(DM_score, 0.25, na.rm = TRUE), 2),
+    DM_IQR75  = round(quantile(DM_score, 0.75, na.rm = TRUE), 2)
+  ) %>%
+  print()
+
+cat("\n----- 假性正常 (Target) vs 正常 (Ref) 组间比较检验 -----\n")
+comp_data <- df_analysis %>% 
+  filter(Group_4cat_90 %in% c("Normal (Ref)", "Pseudonormal (Target)"))
+
+print(t.test(DM_score ~ Group_4cat_90, data = comp_data))
+print(wilcox.test(DM_score ~ Group_4cat_90, data = comp_data))
+library(tidyverse)
+library(ggplot2)
+library(effsize)   # 用于计算标准化效应量 Cohen's d
+library(rstatix)   # 用于成对秩和检验与多重校正
+library(PMCMRplus) # 用于非参数趋势检验 (Jonckheere-Terpstra)
+library(scales)
+# 1. 效应量量化：计算 Cohen's d (Normal vs Pseudonormal)
+comp_two_groups <- df_analysis %>%
+  filter(Group_4cat_90 %in% c("Normal (Ref)", "Pseudonormal (Target)")) %>%
+  filter(!is.na(DM_score))
+
+# 计算 Cohen's d 及其 95% 置信区间
+d_result <- cohen.d(DM_score ~ Group_4cat_90, data = comp_two_groups)
+cat("----- 假性正常组 vs 正常组 Cohen's d 效应量 -----\n")
+print(d_result)
+
+# 2. 四组全景统计：成对比较 (Pairwise Comparisons) 与趋势检验
+# 确保四组因子的生物学退行性临床顺序：
+# Normal (Ref) -> Pseudoabnormal -> Pseudonormal (Target) -> Impaired
+group_levels <- c("Normal (Ref)", "Pseudoabnormal", "Pseudonormal (Target)", "Impaired")
+group_levels <- intersect(group_levels, unique(df_analysis$Group_4cat_90))
+
+df_four_groups <- df_analysis %>%
+  filter(Group_4cat_90 %in% group_levels) %>%
+  filter(!is.na(DM_score)) %>%
+  mutate(Group_4cat_90 = factor(Group_4cat_90, levels = group_levels))
+
+# 2.1 四组描述性统计
+cat("\n----- 四组马氏距离分布全景统计 (Mean, SD, Median, IQR) -----\n")
+df_four_groups %>%
+  group_by(Group_4cat_90) %>%
+  summarise(
+    N         = n(),
+    DM_Mean   = mean(DM_score),
+    DM_SD     = sd(DM_score),
+    DM_Median = median(DM_score),
+    IQR_25    = quantile(DM_score, 0.25),
+    IQR_75    = quantile(DM_score, 0.75)
+  ) %>%
+  print()
+
+# 2.2 成对非参数比较 (Wilcoxon pairwise test，带 FDR / Bonferroni 校正)
+cat("\n----- 四组成对两两比较 (Pairwise Wilcoxon Test with FDR) -----\n")
+pairwise_res <- df_four_groups %>%
+  pairwise_wilcox_test(DM_score ~ Group_4cat_90, p.adjust.method = "fdr")
+print(pairwise_res)
+
+# 2.3 趋势检验：检验马氏距离是否沿临床风险梯度呈单调递增
+cat("\n----- 单调递增趋势检验 (Jonckheere-Terpstra Test) -----\n")
+jt_test <- jonckheereTest(df_four_groups$DM_score, g = df_four_groups$Group_4cat_90, alternative = "increasing")
+print(jt_test)
+
+# 3. 直观可视化：小提琴图 + 箱线图 + 密度分布对比 (SCI 发表级排版)
+# 图 1：四组分布提琴箱线图
+p1 <- ggplot(df_four_groups, aes(x = Group_4cat_90, y = DM_score, fill = Group_4cat_90)) +
+  geom_violin(trim = FALSE, alpha = 0.5, color = NA) +
+  geom_boxplot(width = 0.22, outlier.shape = 21, outlier.size = 1.2, alpha = 0.9, color = "#2C3E50") +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, fill = "white", color = "black") +
+  scale_fill_manual(values = c(
+    "Normal (Ref)"          = "#2E86AB",
+    "Pseudoabnormal"        = "#A23B72",
+    "Pseudonormal (Target)" = "#E63946",
+    "Impaired"              = "#6A0572"
+  )) +
+  labs(
+    title = "Systemic Homeostatic Dysregulation Across Subgroups",
+    subtitle = paste0("Jonckheere-Terpstra Trend P < 2.2e-16 | Target vs Ref Cohen's d = ", round(abs(d_result$estimate), 2)),
+    x = "Clinical Classification",
+    y = expression(paste("Mahalanobis Distance (", D[M], ")"))
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.x = element_text(face = "bold", color = "black"),
+    axis.title = element_text(face = "bold")
+  )
+
+# 图 2：Target vs Ref 双组核密度平滑重叠曲线 (展现两组分布的彻底解耦)
+p2 <- ggplot(comp_two_groups, aes(x = DM_score, fill = Group_4cat_90, color = Group_4cat_90)) +
+  geom_density(alpha = 0.4, size = 0.9) +
+  scale_fill_manual(values = c("Normal (Ref)" = "#2E86AB", "Pseudonormal (Target)" = "#E63946")) +
+  scale_color_manual(values = c("Normal (Ref)" = "#1D5F7A", "Pseudonormal (Target)" = "#B71C1C")) +
+  geom_vline(xintercept = 3.18, linetype = "dashed", color = "#2E86AB", size = 0.8) +
+  geom_vline(xintercept = 6.17, linetype = "dashed", color = "#E63946", size = 0.8) +
+  labs(
+    title = "Kernel Density Estimation: Normal vs. Pseudonormal",
+    x = expression(paste("Mahalanobis Distance (", D[M], ")")),
+    y = "Density",
+    fill = "Subgroup",
+    color = "Subgroup"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+# 打印图像
+print(p1)
+print(p2)
