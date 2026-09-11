@@ -554,3 +554,90 @@ p2 <- ggplot(comp_two_groups, aes(x = DM_score, fill = Group_4cat_90, color = Gr
 # 打印图像
 print(p1)
 print(p2)
+# 输出马氏距离的表格与图表
+library(tidyverse)
+library(ggpubr)
+# 1. 绘制高水平小提琴 + 箱线图 (Violin + Boxplot + P-value)
+# 筛选绘图数据集并设定标准展示因子水平
+plot_df <- df_analysis %>%
+  filter(Group_4cat_90 %in% c("Normal (Ref)", "Pseudonormal (Target)")) %>%
+  filter(!is.na(DM_score)) %>%
+  mutate(
+    Group = factor(Group_4cat_90, 
+                   levels = c("Normal (Ref)", "Pseudonormal (Target)"),
+                   labels = c("Normal\n(Reference)", "Pseudonormal\n(Target)"))
+  )
+
+p_dm <- ggplot(plot_df, aes(x = Group, y = DM_score, fill = Group)) +
+  # 半透明小提琴图展示密度分布
+  geom_violin(trim = FALSE, alpha = 0.35, color = NA, width = 0.7) +
+  # 内部紧凑箱线图展示四分位线
+  geom_boxplot(width = 0.22, color = "#2C3E50", alpha = 0.85, 
+               outlier.shape = 21, outlier.size = 1.5, outlier.alpha = 0.5,
+               show.legend = FALSE) +
+  # 标注各组均值点 (菱形)
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3.5, 
+               fill = "white", color = "#C0392B", stroke = 1.2) +
+  # 自动标注极显著 P 检验标签
+  geom_signif(
+    comparisons = list(c("Normal\n(Reference)", "Pseudonormal\n(Target)")),
+    annotations = "P < 0.001",
+    y_position = max(plot_df$DM_score, na.rm = TRUE) * 0.95,
+    tip_length = 0.02,
+    textsize = 4.5,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = c("#2980B9", "#E74C3C")) +
+  scale_y_continuous(breaks = seq(0, max(plot_df$DM_score, na.rm = TRUE) + 2, by = 2)) +
+  labs(
+    title = "Systemic Physiological Dysregulation by Renal-Aging Phenotype",
+    subtitle = "Mahalanobis Distance (DM) based on 20-39 y/o healthy reference benchmark",
+    x = "",
+    y = expression(paste("Mahalanobis Distance (", D[M], ")"))
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15, hjust = 0.5),
+    plot.subtitle = element_text(size = 11, color = "grey30", hjust = 0.5, margin = margin(b = 15)),
+    axis.text.x = element_text(face = "bold", size = 12, color = "black"),
+    axis.title.y = element_text(face = "bold", size = 13),
+    legend.position = "none"
+  )
+
+# 显示图像
+print(p_dm)
+
+# 保存为 300 DPI 矢量/印刷级图片
+ggsave("Figure_Mahalanobis_Distance_Comparison.png", plot = p_dm, width = 6.5, height = 6.5, dpi = 300)
+ggsave("Figure_Mahalanobis_Distance_Comparison.pdf", plot = p_dm, width = 6.5, height = 6.5)
+
+# 2. 导出统计学比较表格 (CSV)
+# 提取均值、标准差、中位数、IQR 及检验 P 值
+t_res <- t.test(DM_score ~ Group, data = plot_df)
+w_res <- wilcox.test(DM_score ~ Group, data = plot_df)
+
+tab_dm <- plot_df %>%
+  group_by(Group) %>%
+  summarise(
+    Sample_Size = n(),
+    Mean = sprintf("%.2f", mean(DM_score)),
+    SD = sprintf("%.2f", sd(DM_score)),
+    Mean_SD = sprintf("%.2f ± %.2f", mean(DM_score), sd(DM_score)),
+    Median = sprintf("%.2f", median(DM_score)),
+    IQR_25 = sprintf("%.2f", quantile(DM_score, 0.25)),
+    IQR_75 = sprintf("%.2f", quantile(DM_score, 0.75)),
+    Median_IQR = sprintf("%.2f (%.2f, %.2f)", median(DM_score), quantile(DM_score, 0.25), quantile(DM_score, 0.75))
+  ) %>%
+  mutate(
+    Mean_Difference_95CI = c(
+      "Reference", 
+      sprintf("%.2f (%.2f to %.2f)", 
+              t_res$estimate[2] - t_res$estimate[1], 
+              -t_res$conf.int[2], -t_res$conf.int[1])
+    ),
+    t_test_P = ifelse(t_res$p.value < 0.001, "< 0.001", sprintf("%.4f", t_res$p.value)),
+    Wilcoxon_P = ifelse(w_res$p.value < 0.001, "< 0.001", sprintf("%.4f", w_res$p.value))
+  )
+
+print(as.data.frame(tab_dm))
+write.csv(tab_dm, "Table_Mahalanobis_Comparison_Stats.csv", row.names = FALSE)
