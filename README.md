@@ -22,19 +22,20 @@ df_calc <- NHANES4  # 如果你的数据集叫其他名称，请在此处替换
 N0 <- nrow(df_calc)
 
 # 2. 执行纳排与清洗步骤
-df_step1 <- df_calc %>% filter(age >= 45)                  # [排除 1] 年龄纳排：聚焦 >= 45 岁中老年人群
+df_step1 <- df_calc %>% filter(age >= 45)                  
+# [排除 1] 年龄纳排：聚焦 >= 45 岁中老年人群
 N1 <- nrow(df_step1)
-
-df_step2 <- df_step1 %>% filter(is.na(pregnant) | pregnant != 1) # [排除 2] 排除怀孕人群
+df_step2 <- df_step1 %>% filter(is.na(pregnant) | pregnant != 1) 
+# [排除 2] 排除怀孕人群
 N2 <- nrow(df_step2)
-
-df_step3 <- df_step2 %>% filter(!is.na(creat), !is.na(status))  # [排除 3] 关键计算变量缺失（肌酐、生存状态）
+df_step3 <- df_step2 %>% filter(!is.na(creat), !is.na(status))  
+# [排除 3] 关键计算变量缺失（肌酐、生存状态）
 N3 <- nrow(df_step3)
-
-df_step4 <- df_step3 %>% filter(!is.na(phenoage0))           # [排除 4] 无法计算 PhenoAge 的核心生化指标缺失
+df_step4 <- df_step3 %>% filter(!is.na(phenoage0))           
+# [排除 4] 无法计算 PhenoAge 的核心生化指标缺失
 N4 <- nrow(df_step4)
-
-df_step5 <- df_step4 %>% filter(creat < 15)                 # [排除 5] 剔除生理极值/离群值
+df_step5 <- df_step4 %>% filter(creat < 15)                 
+# [排除 5] 剔除生理极值/离群值
 N5 <- nrow(df_step5)
 
 # 3. 规范 PhenoAge 边界值
