@@ -1026,3 +1026,98 @@ print(found_kidney_vars)
 # 3. 模糊匹配所有可能相关的字段名（以防命名不一致）
 cat("\n>>> 包含 'death', 'mort', 'kidney', 'renal', 'kiq' 的全部字段：\n")
 grep("death|mort|kidney|renal|kiq|ucod", names(df_analysis), ignore.case = TRUE, value = TRUE)
+library(tidyverse)
+
+# 动态锁定存在的死亡状态列名 (status 或 mortstat)
+status_col <- intersect(c("status", "mortstat"), names(df_analysis))[1]
+
+# 1. 规范化死因分类标签
+df_analysis <- df_analysis %>%
+  mutate(
+    # 确保 ucod_code 为 3 位字符格式 (如 "001", "002" ...)
+    ucod_code = sprintf("%03d", as.numeric(as.character(ucod_leading))),
+    death_cause_label = case_when(
+      ucod_code == "001" ~ "CVD (Heart Disease)",
+      ucod_code == "002" ~ "Cancer",
+      ucod_code == "003" ~ "Chronic Respiratory",
+      ucod_code == "004" ~ "Stroke (Cerebrovascular)",
+      ucod_code == "005" ~ "Accidents",
+      ucod_code == "006" ~ "Alzheimer's",
+      ucod_code == "007" ~ "Diabetes",
+      ucod_code == "008" ~ "Influenza/Pneumonia",
+      ucod_code == "009" ~ "Kidney Disease (Renal)",
+      ucod_code == "010" ~ "Other Causes",
+      is.na(ucod_leading) & .data[[status_col]] == 0 ~ "Alive",
+      TRUE ~ "Unknown/Other Death"
+    )
+  )
+
+# 2. 同步更新到 df_target 并输出死因分布交叉表
+id_col <- intersect(c("SEQN", "id", "ID"), names(df_target))
+
+if (length(id_col) > 0) {
+  df_target <- df_target %>%
+    select(-any_of("death_cause_label")) %>%
+    left_join(df_analysis %>% select(all_of(c(id_col, "death_cause_label"))), by = id_col)
+} else {
+  # 若没有主键列，直接按行索引匹配（df_target 提取自 df_analysis）
+  df_target$death_cause_label <- df_analysis$death_cause_label[match(rownames(df_target), rownames(df_analysis))]
+}
+
+cat("===== 157 例假性正常人群：两个亚型的死因分布交叉表 =====\n")
+print(table(df_target$Subphenotype, df_target$death_cause_label, useNA = "ifany"))
+library(tidyverse)
+library(tidycmprsk)
+library(ggsurvfit)
+# finegray风险竞争
+# 1. 拟合单因素与多因素 Fine-Gray 回归模型并提取关键指标
+fg_uni <- crr(Surv(time_surv, cvd_crr_status_fac) ~ Subphenotype, data = df_target)
+fg_mult <- crr(Surv(time_surv, cvd_crr_status_fac) ~ Subphenotype + age + Sex, data = df_target)
+
+cat("===== 单因素 Fine-Gray 模型 =====\n")
+print(summary(fg_uni))
+cat("\n===== 多因素校正 Fine-Gray 模型 (校正年龄、性别) =====\n")
+print(summary(fg_mult))
+
+# 提取单因素 SHR 与 Gray's test P 值
+gray_p <- cif_fit$p.value[1] # 提取 Gray 检验 P 值
+gray_p_str <- ifelse(gray_p < 0.001, "Gray's P < 0.001", sprintf("Gray's P = %.3f", gray_p))
+
+# 2. 优化截断随访时间的发表级 CIF 曲线 (截取 150 个月内真实有效观察期)
+p_cif_clean <- cif_fit %>%
+  ggcuminc(outcome = "CVD Death") +
+  add_confidence_interval(alpha = 0.15) +
+  add_risktable(
+    risktable_stats = c("n.risk", "cum.event"),
+    stats_label = list(n.risk = "At Risk", cum.event = "CVD Deaths"),
+    size = 3.6
+  ) +
+  scale_x_continuous(limits = c(0, 150), breaks = seq(0, 150, by = 30)) +
+  scale_y_continuous(limits = c(0, 0.35), breaks = seq(0, 0.3, by = 0.1)) +
+  scale_color_manual(
+    values = c("Subphenotype_1" = "#2980B9", "Subphenotype_2" = "#E74C3C"),
+    labels = c("Subphenotype 1 (Hyperglycemic)", "Subphenotype 2 (Hematopoietic/Immune)")
+  ) +
+  scale_fill_manual(
+    values = c("Subphenotype_1" = "#2980B9", "Subphenotype_2" = "#E74C3C"),
+    labels = c("Subphenotype 1 (Hyperglycemic)", "Subphenotype 2 (Hematopoietic/Immune)")
+  ) +
+  annotate("text", x = 10, y = 0.28, label = gray_p_str, 
+           hjust = 0, size = 4.2, fontface = "italic", color = "grey20") +
+  labs(
+    title = "Cumulative Incidence of Cardiovascular Mortality",
+    subtitle = "Accounting for non-cardiovascular death as a competing risk event",
+    x = "Follow-up Time (Months)",
+    y = "Cumulative Incidence of CVD Death"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle = element_text(size = 10, color = "grey35", hjust = 0.5, margin = margin(b = 10)),
+    axis.title = element_text(face = "bold"),
+    legend.position = "top",
+    legend.title = element_blank()
+  )
+
+print(p_cif_clean)
+ggsave("Figure_CIF_CVD_Clean_150m.png", plot = p_cif_clean, width = 7.5, height = 5.8, dpi = 300)
