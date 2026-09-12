@@ -985,3 +985,44 @@ p_profile <- ggplot(profile_df, aes(x = reorder(Clean_Feature, Standardized_Mean
 
 print(p_profile)
 ggsave("Figure_Subphenotype_Profiles_Barplot.png", plot = p_profile, width = 8, height = 5, dpi = 300)
+library(tidyverse)
+# 亚型表型特征临床转归
+# 1. 检索与死亡结局、死因分类相关的变量
+mort_candidates <- c(
+  "mortstat", "status", "permth_int", "permth_exm", "time",
+  "ucod_leading", "diabetes_death", "hyperten_death", 
+  "ucod", "cause_death", "death_cause", "eligstat"
+)
+
+found_mort_vars <- intersect(mort_candidates, names(df_analysis))
+cat(">>> 检测到的死亡及死因相关变量：\n")
+print(found_mort_vars)
+
+# 查看死因变量的频数分布（若存在 ucod_leading 或类似字段）
+if ("ucod_leading" %in% names(df_analysis)) {
+  cat("\n----- 全人群死因编码 (ucod_leading) 分布 -----\n")
+  print(table(df_analysis$ucod_leading, useNA = "ifany"))
+  
+  if (exists("df_target")) {
+    cat("\n----- 157 例假性正常人群内部死因分布 -----\n")
+    print(table(df_target$Subphenotype, df_target$ucod_leading, useNA = "ifany"))
+  }
+}
+
+# 2. 检索与肾脏终点、透析、蛋白尿相关的变量
+kidney_candidates <- c(
+  # 问卷变量：透析/肾病病史
+  "KIQ022", "KIQ026", "KIQ025", "kiq022", "dialysis", "kidney_failure",
+  # 检验变量：尿微量白蛋白、尿肌酐、ACR
+  "URXUMA", "URXUCR", "acr", "uacr", "albuminuria",
+  # 随访结局相关字段
+  "ckd_incident", "esrd", "renal_death"
+)
+
+found_kidney_vars <- intersect(kidney_candidates, names(df_analysis))
+cat("\n>>> 检测到的肾脏/透析/蛋白尿相关变量：\n")
+print(found_kidney_vars)
+
+# 3. 模糊匹配所有可能相关的字段名（以防命名不一致）
+cat("\n>>> 包含 'death', 'mort', 'kidney', 'renal', 'kiq' 的全部字段：\n")
+grep("death|mort|kidney|renal|kiq|ucod", names(df_analysis), ignore.case = TRUE, value = TRUE)
