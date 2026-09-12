@@ -1069,7 +1069,7 @@ print(table(df_target$Subphenotype, df_target$death_cause_label, useNA = "ifany"
 library(tidyverse)
 library(tidycmprsk)
 library(ggsurvfit)
-# finegray风险竞争
+# finegray风险竞争（假性正常组两个亚型比较）
 # 1. 拟合单因素与多因素 Fine-Gray 回归模型并提取关键指标
 fg_uni <- crr(Surv(time_surv, cvd_crr_status_fac) ~ Subphenotype, data = df_target)
 fg_mult <- crr(Surv(time_surv, cvd_crr_status_fac) ~ Subphenotype + age + Sex, data = df_target)
