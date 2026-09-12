@@ -1249,8 +1249,21 @@ shap_long <- shap.prep(
   top_n     = ncol(X_mat)
 )
 # 阶段 4: 绘制顶刊级 SHAP Summary Plot (蜂群图) 与 Dependence Plot (依赖图)
+library(ggplot2)
+library(cowplot)
 # 1. 绘制全局特征归因蜂群图 (Summary Beeswarm Plot)
 p_shap_summary <- shap.plot.summary(shap_long) +
+  # 重新设定渐变色条，彻底拉伸展开图例高度，杜绝挤压重叠
+  guides(
+    color = guide_colorbar(
+      title = "Feature\nValue",
+      barwidth = unit(0.45, "cm"),
+      barheight = unit(4.2, "cm"),
+      ticks = TRUE,
+      title.position = "top",
+      title.hjust = 0.5
+    )
+  ) +
   labs(
     title = "SHAP Attribution for Pseudonormal Phenotype",
     subtitle = "Relative marginal contribution of individual features in pushing individuals into Pseudonormal status",
@@ -1258,42 +1271,96 @@ p_shap_summary <- shap.plot.summary(shap_long) +
   ) +
   theme_classic(base_size = 12) +
   theme(
-    plot.title    = element_text(face = "bold", size = 13, hjust = 0.5),
-    plot.subtitle = element_text(size = 10, color = "grey30", hjust = 0.5, margin = margin(b = 10)),
-    axis.text     = element_text(color = "black")
+    plot.title       = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle    = element_text(size = 10, color = "grey35", hjust = 0.5, margin = margin(b = 10)),
+    axis.title       = element_text(face = "bold"),
+    axis.text        = element_text(color = "black"),
+    legend.position  = "right",
+    legend.title     = element_text(face = "bold", size = 9),
+    legend.text      = element_text(size = 8),
+    legend.margin    = margin(l = 8)
   )
 
 print(p_shap_summary)
-ggsave("Figure_SHAP_Summary_Beeswarm.png", plot = p_shap_summary, width = 8, height = 6, dpi = 300)
+ggsave("Figure_SHAP_Summary_Beeswarm.png", plot = p_shap_summary, width = 8.5, height = 6.2, dpi = 300)
 
-# 2. 绘制核心非线性单特征依赖图 (Dependence Plot)
-# (1) 血糖依赖图: 揭示高滤过掩盖下的高糖负荷激增拐点
+library(ggplot2)
+library(cowplot)
+# 1. 血糖依赖图 (按最强交互特征 RDW 着色，展开渐变色条)
 p_dep_glu <- shap.plot.dependence(
-  data_long   = shap_long,
-  x           = "Fasting Glucose",
-  color_feature = "auto"
+  data_long     = shap_long,
+  x             = "Fasting Glucose",
+  color_feature = "RDW (Hematopoiesis)"
 ) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
-  labs(
-    title = "SHAP Dependence: Fasting Glucose",
-    y = "SHAP value for Glucose"
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.6) +
+  guides(
+    color = guide_colorbar(
+      title = "RDW (Z-score)",
+      barwidth = unit(0.35, "cm"),
+      barheight = unit(3.0, "cm"),
+      ticks = TRUE,
+      title.position = "top",
+      title.hjust = 0.5
+    )
   ) +
-  theme_classic(base_size = 11)
-
-# (2) RDW 依赖图: 揭示造血异质性与全身衰老标志物的边际推动拐点
+  labs(
+    title = "Fasting Glucose",
+    x = "Standardized Fasting Glucose (Z-score)",
+    y = "SHAP Value for Glucose"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 12, hjust = 0.5),
+    axis.title       = element_text(face = "bold"),
+    axis.text        = element_text(color = "black"),
+    legend.position  = "right",
+    legend.title     = element_text(face = "bold", size = 8.5),
+    legend.text      = element_text(size = 7.5),
+    legend.margin    = margin(l = 4)
+  )
+# 2. RDW 依赖图 (按血肌酐着色，展开渐变色条)
 p_dep_rdw <- shap.plot.dependence(
-  data_long   = shap_long,
-  x           = "RDW (Hematopoiesis)",
-  color_feature = "auto"
+  data_long     = shap_long,
+  x             = "RDW (Hematopoiesis)",
+  color_feature = "Serum Creatinine"
 ) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
-  labs(
-    title = "SHAP Dependence: RDW",
-    y = "SHAP value for RDW"
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.6) +
+  guides(
+    color = guide_colorbar(
+      title = "Creatinine (Z-score)",
+      barwidth = unit(0.35, "cm"),
+      barheight = unit(3.0, "cm"),
+      ticks = TRUE,
+      title.position = "top",
+      title.hjust = 0.5
+    )
   ) +
-  theme_classic(base_size = 11)
+  labs(
+    title = "RDW (Hematopoiesis)",
+    x = "Standardized RDW (Z-score)",
+    y = "SHAP Value for RDW"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 12, hjust = 0.5),
+    axis.title       = element_text(face = "bold"),
+    axis.text        = element_text(color = "black"),
+    legend.position  = "right",
+    legend.title     = element_text(face = "bold", size = 8.5),
+    legend.text      = element_text(size = 7.5),
+    legend.margin    = margin(l = 4)
+  )
+# 3. 拼合并以充分宽度保存 (保留图例宽度，杜绝压缩)
+p_dep_combined <- cowplot::plot_grid(
+  p_dep_glu, p_dep_rdw,
+  ncol = 2,
+  align = "h",
+  labels = c("A", "B"),
+  label_size = 13,
+  label_fontface = "bold",
+  rel_widths = c(1, 1)
+)
 
-# 拼合依赖图
-p_dep_combined <- cowplot::plot_grid(p_dep_glu, p_dep_rdw, ncol = 2)
 print(p_dep_combined)
-ggsave("Figure_SHAP_Dependence_Plots.png", plot = p_dep_combined, width = 9.5, height = 4.5, dpi = 300)
+ggsave("Figure_SHAP_Dependence_Colored.png", plot = p_dep_combined, width = 10.5, height = 4.6, dpi = 300)
+ggsave("Figure_SHAP_Dependence_Colored.pdf", plot = p_dep_combined, width = 10.5, height = 4.6)
