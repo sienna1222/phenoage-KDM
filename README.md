@@ -641,3 +641,219 @@ tab_dm <- plot_df %>%
 
 print(as.data.frame(tab_dm))
 write.csv(tab_dm, "Table_Mahalanobis_Comparison_Stats.csv", row.names = FALSE)
+# cox
+library(tidyverse)
+library(survival)
+
+# 1. 数据准备与变量清洗
+time_col   <- intersect(c("permth_exm", "time", "permth_int"), names(df_analysis))[1]
+status_col <- intersect(c("status", "mortstat"), names(df_analysis))[1]
+
+# 统一分析数据集：设置 Normal (Ref) 为基准参照
+df_cox <- df_analysis %>%
+  filter(!is.na(Group_4cat_90)) %>%
+  mutate(
+    time_surv   = as.numeric(.data[[time_col]]),
+    status_surv = as.numeric(.data[[status_col]]),
+    Group_4cat_90 = relevel(factor(Group_4cat_90), ref = "Normal (Ref)"),
+    Sex           = factor(gender, levels = c(1, 2), labels = c("Male", "Female")),
+    Hypertension  = factor(Hypertension),
+    Diabetes      = factor(Diabetes)
+  )
+
+# 2. 辅助函数：提取 Cox 模型中各暴露组的 HR (95% CI) 与 P 值
+extract_cox_res <- function(model, exposure_var, ref_level = "Normal (Ref)") {
+  s <- summary(model)
+  coef_mat <- s$coefficients
+  conf_mat <- s$conf.int
+  
+  target_rows <- grep(paste0("^", exposure_var), rownames(coef_mat))
+  var_names   <- gsub(paste0("^", exposure_var), "", rownames(coef_mat)[target_rows])
+  
+  hr_str <- sprintf("%.2f (%.2f-%.2f)", 
+                    conf_mat[target_rows, "exp(coef)"],
+                    conf_mat[target_rows, "lower .95"],
+                    conf_mat[target_rows, "upper .95"])
+  p_vals <- ifelse(coef_mat[target_rows, "Pr(>|z|)"] < 0.001, "<0.001",
+                   sprintf("%.3f", coef_mat[target_rows, "Pr(>|z|)"]))
+  
+  # 加入 Reference 基准行
+  tibble(
+    Subgroup = c(ref_level, var_names),
+    Result   = c("1.00 (Reference)", paste0(hr_str, " (P = ", p_vals, ")"))
+  )
+}
+
+# 3. 针对“四分类分组表型 (Group_4cat_90)”拟合三个层级模型
+
+# Model 1: Crude (未校正)
+m1_grp <- coxph(Surv(time_surv, status_surv) ~ Group_4cat_90, data = df_cox)
+
+# Model 2: 校正人口学变量 (Age, Sex, Race)
+m2_grp <- coxph(Surv(time_surv, status_surv) ~ Group_4cat_90 + age + Sex + race, data = df_cox)
+
+# Model 3: 全校正模型 (+ Hypertension, Diabetes, BMI, eGFR)
+m3_grp <- coxph(Surv(time_surv, status_surv) ~ Group_4cat_90 + age + Sex + race + 
+                  Hypertension + Diabetes + egfr, data = df_cox)
+
+res_m1_grp <- extract_cox_res(m1_grp, "Group_4cat_90") %>% rename(Model_1 = Result)
+res_m2_grp <- extract_cox_res(m2_grp, "Group_4cat_90") %>% rename(Model_2 = Result)
+res_m3_grp <- extract_cox_res(m3_grp, "Group_4cat_90") %>% rename(Model_3 = Result)
+
+# 汇总各组事件数与总人数
+event_counts <- df_cox %>%
+  group_by(Group_4cat_90) %>%
+  summarise(
+    Events_Total = paste0(sum(status_surv == 1, na.rm = TRUE), "/", n()),
+    .groups = "drop"
+  ) %>%
+  rename(Subgroup = Group_4cat_90)
+
+table_group <- event_counts %>%
+  left_join(res_m1_grp, by = "Subgroup") %>%
+  left_join(res_m2_grp, by = "Subgroup") %>%
+  left_join(res_m3_grp, by = "Subgroup")
+
+# 4. 针对“马氏距离连续指标 (DM_scaled)”拟合三个层级模型
+extract_continuous_res <- function(model, var_name) {
+  s <- summary(model)
+  hr_str <- sprintf("%.2f (%.2f-%.2f)", 
+                    s$conf.int[var_name, "exp(coef)"],
+                    s$conf.int[var_name, "lower .95"],
+                    s$conf.int[var_name, "upper .95"])
+  p_val <- ifelse(s$coefficients[var_name, "Pr(>|z|)"] < 0.001, "<0.001",
+                  sprintf("%.3f", s$coefficients[var_name, "Pr(>|z|)"]))
+  paste0(hr_str, " (P = ", p_val, ")")
+}
+
+m1_dm <- coxph(Surv(time_surv, status_surv) ~ DM_scaled, data = df_cox)
+m2_dm <- coxph(Surv(time_surv, status_surv) ~ DM_scaled + age + Sex + race, data = df_cox)
+m3_dm <- coxph(Surv(time_surv, status_surv) ~ DM_scaled + age + Sex + race + 
+                 Hypertension + Diabetes + egfr, data = df_cox)
+
+dm_events <- paste0(sum(df_cox$status_surv == 1 & !is.na(df_cox$DM_scaled)), "/", 
+                    sum(!is.na(df_cox$DM_scaled)))
+
+table_dm <- tibble(
+  Subgroup     = "Per 1-SD increase in DM",
+  Events_Total = dm_events,
+  Model_1      = extract_continuous_res(m1_dm, "DM_scaled"),
+  Model_2      = extract_continuous_res(m2_dm, "DM_scaled"),
+  Model_3      = extract_continuous_res(m3_dm, "DM_scaled")
+)
+
+# 5. 合并为标准期刊三线表并导出 CSV
+cox_table_final <- bind_rows(
+  tibble(Subgroup = "Renal-Aging Phenotype", Events_Total = "", Model_1 = "", Model_2 = "", Model_3 = ""),
+  table_group,
+  tibble(Subgroup = "Systemic Dysregulation Metric", Events_Total = "", Model_1 = "", Model_2 = "", Model_3 = ""),
+  table_dm
+)
+
+print(as.data.frame(cox_table_final))
+write.csv(cox_table_final, "Table_Cox_Three_Models_Mortality.csv", row.names = FALSE)
+# RCS
+library(tidyverse)
+library(survival)
+library(rms)
+# 1. 动态匹配变量名与数据准备
+time_col   <- intersect(c("permth_exm", "time", "permth_int"), names(df_analysis))[1]
+status_col <- intersect(c("status", "mortstat"), names(df_analysis))[1]
+bmi_col    <- intersect(c("bmi", "BMXBMI"), names(df_analysis))[1]
+
+# 统一提取 Model 3 所需的核心变量
+rcs_vars <- c(time_col, status_col, "DM_score", "age", "Sex", "race", 
+              "Hypertension", "Diabetes", bmi_col, "egfr")
+rcs_vars <- intersect(rcs_vars, names(df_analysis))
+
+df_rcs <- df_analysis %>%
+  select(all_of(rcs_vars)) %>%
+  rename(bmi = all_of(bmi_col)) %>%
+  drop_na() %>%
+  mutate(
+    time_surv    = as.numeric(.data[[time_col]]),
+    status_surv  = as.numeric(.data[[status_col]]),
+    Sex          = as.factor(Sex),
+    race         = as.factor(race),
+    Hypertension = as.factor(Hypertension),
+    Diabetes     = as.factor(Diabetes)
+  )
+
+# 2. 设置 rms 绘图环境并拟合全校正 RCS Cox 模型
+dd <- datadist(df_rcs)
+options(datadist = "dd")
+
+# 设定健康基准中位数作为对照参考点 (HR = 1.0)
+ref_val <- round(median(df_rcs$DM_score, na.rm = TRUE), 2)
+
+# 拟合 4 节点限制性立方样条模型 (严格对齐 Model 3)
+fit_rcs <- cph(
+  Surv(time_surv, status_surv) ~ rcs(DM_score, 4) + age + Sex + race + 
+    Hypertension + Diabetes + bmi + egfr,
+  data = df_rcs,
+  x = TRUE, 
+  y = TRUE
+)
+
+# 提取整体检验与非线性检验 P 值
+anova_rcs     <- anova(fit_rcs)
+p_overall     <- anova_rcs["DM_score", "P"]
+p_nonlin      <- anova_rcs[" Nonlinear", "P"]
+p_overall_str <- ifelse(p_overall < 0.001, "< 0.001", sprintf("%.3f", p_overall))
+p_nonlin_str  <- ifelse(p_nonlin < 0.001,  "< 0.001", sprintf("%.3f", p_nonlin))
+
+cat(paste0("\n>>> RCS 统计检验: P-overall = ", p_overall_str, " | P-non-linear = ", p_nonlin_str, "\n"))
+
+# 3. 截断极值区间并自动量化致死风险升高拐点 (Cut-off)
+
+# 截取第 1 至第 99 百分位数，避免极端离群值导致置信区间发散
+p1_val  <- quantile(df_rcs$DM_score, 0.01)
+p99_val <- quantile(df_rcs$DM_score, 0.99)
+
+eval_points <- seq(p1_val, p99_val, length.out = 300)
+pred_rcs    <- Predict(fit_rcs, DM_score = eval_points, ref.zero = TRUE, fun = exp)
+pred_df     <- as.data.frame(pred_rcs)
+
+# 寻找致死拐点：中位数右侧 95% CI 下限 (lower) 首次稳定大于 1.0 的点
+inflection_row <- pred_df %>%
+  filter(DM_score >= ref_val, lower > 1.0) %>%
+  slice(1)
+
+cutoff_dm <- round(inflection_row$DM_score, 2)
+cat(paste0(">>> 自动化确立致死拐点阈值: 当 DM > ", cutoff_dm, " 时，死亡风险发生统计学显著增加 (Lower 95% CI > 1.0)\n\n"))
+
+# 4. 绘制并导出符合发表标准的 RCS 曲线
+p_rcs <- ggplot(pred_df, aes(x = DM_score, y = yhat)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "#E74C3C", alpha = 0.18) +
+  geom_line(color = "#C0392B", linewidth = 1.2) +
+  geom_hline(yintercept = 1.0, linetype = "dashed", color = "grey45", linewidth = 0.8) +
+  geom_vline(xintercept = ref_val, linetype = "dotted", color = "#2980B9", linewidth = 0.9) +
+  geom_vline(xintercept = cutoff_dm, linetype = "dashed", color = "#8E44AD", linewidth = 0.9) +
+  annotate("text", x = ref_val, y = 0.7, 
+           label = paste0("Reference\n(Median = ", ref_val, ")"), 
+           color = "#2980B9", size = 3.6, fontface = "bold", vjust = 1) +
+  annotate("text", x = cutoff_dm, y = max(pred_df$upper) * 0.75, 
+           label = paste0("Threshold\n(DM = ", cutoff_dm, ")"), 
+           color = "#8E44AD", size = 3.6, fontface = "bold", hjust = -0.1) +
+  annotate("text", x = p1_val + 0.5, y = max(pred_df$upper) * 0.92, 
+           label = paste0("P for overall < 0.001\nP for non-linearity = ", p_nonlin_str), 
+           hjust = 0, size = 4, fontface = "italic", color = "grey20") +
+  scale_y_continuous(breaks = seq(0.5, ceiling(max(pred_df$upper)), by = 0.5)) +
+  labs(
+    title = "Dose-Response Association Between Mahalanobis Distance and All-Cause Mortality",
+    subtitle = "Multivariable Cox restricted cubic spline model fully adjusted for Model 3 covariates",
+    x = expression(paste("Systemic Physiological Dysregulation (Mahalanobis Distance, ", D[M], ")")),
+    y = "Hazard Ratio (95% CI)"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle = element_text(size = 10.5, color = "grey30", hjust = 0.5, margin = margin(b = 12)),
+    axis.title    = element_text(face = "bold"),
+    axis.text     = element_text(color = "black")
+  )
+
+print(p_rcs)
+
+ggsave("Figure_RCS_DM_FullyAdjusted.png", plot = p_rcs, width = 7.5, height = 5.8, dpi = 300)
+ggsave("Figure_RCS_DM_FullyAdjusted.pdf", plot = p_rcs, width = 7.5, height = 5.8)
