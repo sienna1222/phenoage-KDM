@@ -857,3 +857,131 @@ print(p_rcs)
 
 ggsave("Figure_RCS_DM_FullyAdjusted.png", plot = p_rcs, width = 7.5, height = 5.8, dpi = 300)
 ggsave("Figure_RCS_DM_FullyAdjusted.pdf", plot = p_rcs, width = 7.5, height = 5.8)
+library(tidyverse)
+library(cluster)
+library(factoextra)
+library(survival)
+library(survminer)
+# 聚类分析
+# 第一步：提取 157 例“假性正常”目标人群及其标准化特征矩阵
+# 1. 明确参与聚类的核心生物学轴系变量（已完成 Z-score 标准化的变量）
+cluster_feature_names <- c(
+  "z_feat_alb",    # 营养/肝脏稳态 (Albumin)
+  "z_feat_creat",  # 基础肌肉代谢 (Creatinine)
+  "z_feat_glu",    # 糖代谢负荷 (Glucose)
+  "z_feat_crp",    # 全身微炎症 (CRP)
+  "z_feat_lymph",  # 获得性免疫储备 (Lymphocyte %)
+  "z_feat_mcv",    # 红细胞容积 (MCV)
+  "z_feat_rdw",    # 红细胞异质性/造血系统应激 (RDW)
+  "z_feat_alp",    # 肝胆/骨骼代谢毒性 (ALP)
+  "z_feat_wbc"     # 先天免疫/白细胞系统 (WBC)
+)
+
+# 2. 筛选 157 例假性正常人群，并剔除特征矩阵中缺失的个案
+df_target <- df_analysis %>%
+  filter(Group_4cat_90 == "Pseudonormal (Target)") %>%
+  filter(if_all(all_of(cluster_feature_names), ~ !is.na(.x)))
+
+cat("成功纳入聚类分析的目标假性正常样本量 N =", nrow(df_target), "\n")
+
+# 3. 构建聚类专用矩阵 (行名为受试者唯一索引，便于后续合并标签)
+mat_cluster <- df_target %>%
+  select(all_of(cluster_feature_names)) %>%
+  as.matrix()
+rownames(mat_cluster) <- paste0("ID_", seq_len(nrow(mat_cluster)))
+
+# 第二步：自动化网格搜索最佳聚类簇数 K (Elbow Method & Silhouette Method)
+set.seed(2026)
+
+# 1. 手肘法 (Total Within Sum of Squares)
+p_elbow <- fviz_nbclust(mat_cluster, kmeans, method = "wss", k.max = 6) +
+  geom_vline(xintercept = 2, linetype = "dashed", color = "#E74C3C") +
+  labs(title = "Optimal Number of Clusters: Elbow Method",
+       x = "Number of Clusters K", y = "Total Within-Cluster Sum of Squares") +
+  theme_classic(base_size = 12)
+
+# 2. 平均轮廓系数法 (Average Silhouette Width, 寻找峰值)
+p_silhouette <- fviz_nbclust(mat_cluster, kmeans, method = "silhouette", k.max = 6) +
+  labs(title = "Optimal Number of Clusters: Silhouette Method",
+       x = "Number of Clusters K", y = "Average Silhouette Width") +
+  theme_classic(base_size = 12)
+
+# 拼图展示并保存评估图
+p_eval <- cowplot::plot_grid(p_elbow, p_silhouette, ncol = 2)
+print(p_eval)
+ggsave("Figure_Clustering_K_Evaluation.png", plot = p_eval, width = 9, height = 4, dpi = 300)
+
+# 第三步：执行 K-means 聚类 (以确定 K = 2 为例，亦可根据评估图调整为 3)
+k_optimal <- 2  # 根据临床假设与轮廓系数，解耦为 2 种主要失调表型
+
+set.seed(2026)
+fit_km <- kmeans(mat_cluster, centers = k_optimal, nstart = 50, iter.max = 100)
+
+# 将聚类簇标签追加到数据集
+df_target$Subphenotype <- factor(
+  fit_km$cluster, 
+  levels = 1:k_optimal,
+  labels = paste0("Subphenotype_", 1:k_optimal)
+)
+
+cat("各亚型样本量分配：\n")
+print(table(df_target$Subphenotype))
+
+# 降维可视化：基于 PCA 投影的聚类散点图
+p_cluster_pca <- fviz_cluster(
+  fit_km, 
+  data = mat_cluster,
+  geom = "point",
+  ellipse.type = "convex",
+  palette = c("#2980B9", "#E74C3C"),
+  ggtheme = theme_classic(base_size = 12),
+  main = "PCA Projection of Pseudonormal Subphenotypes"
+)
+print(p_cluster_pca)
+# 第四步：绘制各亚型标准化特征偏离度条形图
+# 1. 计算每个簇在各维度的均值
+profile_df <- df_target %>%
+  group_by(Subphenotype) %>%
+  summarise(across(all_of(cluster_feature_names), mean), .groups = "drop") %>%
+  pivot_longer(-Subphenotype, names_to = "Feature", values_to = "Standardized_Mean") %>%
+  mutate(
+    Clean_Feature = case_when(
+      Feature == "z_feat_alb"   ~ "Albumin",
+      Feature == "z_feat_creat" ~ "Creatinine",
+      Feature == "z_feat_glu"   ~ "Glucose",
+      Feature == "z_feat_crp"   ~ "hs-CRP",
+      Feature == "z_feat_lymph" ~ "Lymphocyte %",
+      Feature == "z_feat_mcv"   ~ "MCV",
+      Feature == "z_feat_rdw"   ~ "RDW",
+      Feature == "z_feat_alp"   ~ "ALP",
+      Feature == "z_feat_wbc"   ~ "WBC",
+      TRUE ~ Feature
+    )
+  )
+
+# 2. 绘制分面水平条形图
+p_profile <- ggplot(profile_df, aes(x = reorder(Clean_Feature, Standardized_Mean), 
+                                   y = Standardized_Mean, 
+                                   fill = Subphenotype)) +
+  geom_bar(stat = "identity", width = 0.65, alpha = 0.85) +
+  coord_flip() +
+  facet_wrap(~ Subphenotype, scales = "free_x") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  scale_fill_manual(values = c("Subphenotype_1" = "#2980B9", "Subphenotype_2" = "#E74C3C")) +
+  labs(
+    title = "Clinical and Biochemical Signatures Across Subphenotypes",
+    subtitle = "Z-score standardized deviation profiles (Mean = 0 line indicates population baseline)",
+    x = "Biomarkers",
+    y = "Standardized Mean Value (Z-score)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle = element_text(size = 10, color = "grey30", hjust = 0.5, margin = margin(b = 10)),
+    axis.text = element_text(color = "black")
+  )
+
+print(p_profile)
+ggsave("Figure_Subphenotype_Profiles_Barplot.png", plot = p_profile, width = 8, height = 5, dpi = 300)
