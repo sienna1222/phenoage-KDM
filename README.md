@@ -1121,3 +1121,179 @@ p_cif_clean <- cif_fit %>%
 
 print(p_cif_clean)
 ggsave("Figure_CIF_CVD_Clean_150m.png", plot = p_cif_clean, width = 7.5, height = 5.8, dpi = 300)
+# SHAP
+# 阶段 1: 样本与特征筛选 (限制在 eGFR >= 90 人群内部，避免数据泄露)
+# 安装必要包 (若未安装):
+# install.packages(c("xgboost", "SHAPforxgboost", "pROC", "PRROC", "tidyverse"))
+library(tidyverse)
+library(xgboost)
+library(SHAPforxgboost)
+library(pROC)
+library(PRROC)
+
+# 1. 明确自变量特征列表 (严格排除马氏距离 DM、PhenoAge 等综合标签，防止循环论证)
+feature_cols <- c(
+  "age", "Sex", "bmi",
+  "z_feat_alb",    # 白蛋白
+  "z_feat_creat",  # 肌酐
+  "z_feat_glu",    # 血糖
+  "z_feat_crp",    # hs-CRP
+  "z_feat_lymph",  # 淋巴细胞 %
+  "z_feat_mcv",    # MCV
+  "z_feat_rdw",    # RDW
+  "z_feat_alp",    # ALP
+  "z_feat_wbc"     # 白细胞
+)
+
+# 2. 筛选目标群体: 6224 例 Normal (Ref) vs 157 例 Pseudonormal (Target)
+df_ml <- df_analysis %>%
+  filter(Group_4cat_90 %in% c("Normal (Ref)", "Pseudonormal (Target)")) %>%
+  mutate(
+    # 二分类目标变量: 1 = Pseudonormal (Target), 0 = Normal (Ref)
+    target_label = if_else(Group_4cat_90 == "Pseudonormal (Target)", 1L, 0L),
+    # 性别数值化编码 (0/1)
+    Sex = as.numeric(as.factor(Sex)) - 1
+  ) %>%
+  select(target_label, all_of(feature_cols)) %>%
+  drop_na()
+
+cat("===== 建模人群样本量及正负样本分布 =====\n")
+print(table(df_ml$target_label))
+
+# 3. 构造 XGBoost 原生数值矩阵
+X_mat <- as.matrix(df_ml %>% select(-target_label))
+y_vec <- df_ml$target_label
+
+# 计算正负样本失衡权重 (大约为 6224 / 157 ≈ 39.6)
+neg_count <- sum(y_vec == 0)
+pos_count <- sum(y_vec == 1)
+imbalance_ratio <- neg_count / pos_count
+cat(sprintf("负正样本比例 (scale_pos_weight) = %.2f\n", imbalance_ratio))
+
+dtrain <- xgb.DMatrix(data = X_mat, label = y_vec)
+# 阶段 2：规范化 xgb.cv 参数并训练最终模型
+set.seed(2026)
+
+# 1. 明确使用单个核心指标 eval_metric = "auc"
+xgb_params <- list(
+  objective        = "binary:logistic",
+  eval_metric      = "auc",
+  scale_pos_weight = imbalance_ratio,
+  max_depth        = 4,
+  eta              = 0.05,
+  subsample        = 0.8,
+  colsample_bytree = 0.8
+)
+
+# 2. 执行 10 折交叉验证
+cv_model <- xgb.cv(
+  params                = xgb_params,
+  data                  = dtrain,
+  nrounds               = 300,
+  nfold                 = 10,
+  stratified            = TRUE,
+  early_stopping_rounds = 20,
+  verbose               = FALSE
+)
+
+# 3. 提取最优迭代轮数（加入默认值兜底，避免 NULL）
+best_nrounds <- cv_model$best_iteration
+if (is.null(best_nrounds) || length(best_nrounds) == 0 || best_nrounds < 1) {
+  best_nrounds <- 100
+}
+cat(sprintf("最优迭代轮数 (Best Iteration) = %d\n", best_nrounds))
+
+# 4. 训练最终模型
+final_xgb <- xgb.train(
+  params  = xgb_params,
+  data    = dtrain,
+  nrounds = best_nrounds
+)
+
+# 5. 模型性能评估
+pred_probs <- predict(final_xgb, dtrain)
+roc_obj <- roc(y_vec, pred_probs, quiet = TRUE)
+pr_obj <- pr.curve(scores.class0 = pred_probs[y_vec == 1],
+                   scores.class1 = pred_probs[y_vec == 0],
+                   curve = TRUE)
+
+cat(sprintf("训练集 ROC-AUC = %.3f\n", roc_obj$auc))
+cat(sprintf("训练集 PR-AUC  = %.3f\n", pr_obj$auc.integral))
+# 阶段 3: SHAP 边际贡献度提取 (基于 TreeSHAP 算法)
+# 1. 提取全样本的 SHAP 贡献矩阵与原始特征矩阵
+shap_values <- shap.values(xgb_model = final_xgb, X_train = X_mat)
+
+# 2. 准备画图所需的规整化 SHAP 数据框
+# 优化特征标签名称以用于顶级期刊图表排版
+clean_feature_names <- c(
+  "age"          = "Chronological Age",
+  "Sex"          = "Sex",
+  "bmi"          = "BMI",
+  "z_feat_alb"   = "Serum Albumin",
+  "z_feat_creat" = "Serum Creatinine",
+  "z_feat_glu"   = "Fasting Glucose",
+  "z_feat_crp"   = "hs-CRP (Inflammation)",
+  "z_feat_lymph" = "Lymphocyte %",
+  "z_feat_mcv"   = "Mean Corpuscular Volume",
+  "z_feat_rdw"   = "RDW (Hematopoiesis)",
+  "z_feat_alp"   = "Alkaline Phosphatase",
+  "z_feat_wbc"   = "White Blood Cell Count"
+)
+
+colnames(X_mat) <- clean_feature_names[colnames(X_mat)]
+
+# 重新准备格式化长数据
+shap_long <- shap.prep(
+  xgb_model = final_xgb,
+  X_train   = X_mat,
+  top_n     = ncol(X_mat)
+)
+# 阶段 4: 绘制顶刊级 SHAP Summary Plot (蜂群图) 与 Dependence Plot (依赖图)
+# 1. 绘制全局特征归因蜂群图 (Summary Beeswarm Plot)
+p_shap_summary <- shap.plot.summary(shap_long) +
+  labs(
+    title = "SHAP Attribution for Pseudonormal Phenotype",
+    subtitle = "Relative marginal contribution of individual features in pushing individuals into Pseudonormal status",
+    x = "SHAP Value (Impact on Model Log-Odds Output)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle = element_text(size = 10, color = "grey30", hjust = 0.5, margin = margin(b = 10)),
+    axis.text     = element_text(color = "black")
+  )
+
+print(p_shap_summary)
+ggsave("Figure_SHAP_Summary_Beeswarm.png", plot = p_shap_summary, width = 8, height = 6, dpi = 300)
+
+# 2. 绘制核心非线性单特征依赖图 (Dependence Plot)
+# (1) 血糖依赖图: 揭示高滤过掩盖下的高糖负荷激增拐点
+p_dep_glu <- shap.plot.dependence(
+  data_long   = shap_long,
+  x           = "Fasting Glucose",
+  color_feature = "auto"
+) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    title = "SHAP Dependence: Fasting Glucose",
+    y = "SHAP value for Glucose"
+  ) +
+  theme_classic(base_size = 11)
+
+# (2) RDW 依赖图: 揭示造血异质性与全身衰老标志物的边际推动拐点
+p_dep_rdw <- shap.plot.dependence(
+  data_long   = shap_long,
+  x           = "RDW (Hematopoiesis)",
+  color_feature = "auto"
+) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    title = "SHAP Dependence: RDW",
+    y = "SHAP value for RDW"
+  ) +
+  theme_classic(base_size = 11)
+
+# 拼合依赖图
+p_dep_combined <- cowplot::plot_grid(p_dep_glu, p_dep_rdw, ncol = 2)
+print(p_dep_combined)
+ggsave("Figure_SHAP_Dependence_Plots.png", plot = p_dep_combined, width = 9.5, height = 4.5, dpi = 300)
